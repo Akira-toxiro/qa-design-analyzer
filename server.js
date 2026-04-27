@@ -1,60 +1,130 @@
-# QA Design — Score Analyzer
+const express = require('express');
+const cors = require('cors');
+const Anthropic = require('@anthropic-ai/sdk');
+const path = require('path');
 
-Sistema de avaliação automatizada de artes de design com IA.
+const app = express();
+app.use(cors());
+app.use(express.json({ limit: '20mb' }));
+app.use(express.static(path.join(__dirname, 'public')));
 
-## Pré-requisitos
+const client = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY
+});
 
-- Node.js 18+ instalado → https://nodejs.org
-- Chave da API da Anthropic → https://console.anthropic.com
+const SYSTEM_PROMPT = `Você é um especialista em QA de design com anos de experiência avaliando peças visuais para agências e times de design.
 
-## Instalação
+Seu trabalho é analisar artes de design e atribuir notas rigorosas baseadas nos critérios abaixo.
 
-```bash
-# 1. Instalar dependências
-npm install
+ESCALA DE NOTAS:
+- 0 = erro claro (não atende ao mínimo exigido)
+- 1 = aceitável com ajuste necessário
+- 2 = correto e bem executado
 
-# 2. Configurar a chave da API (escolha uma opção)
+PADRÕES TÉCNICOS DO TIME:
+- Tamanho mínimo título em redes sociais: 50px bold
+- Tamanho mínimo corpo em redes sociais: 28-35px regular
+- Contraste mínimo: 4.5:1 (WCAG AA)
+- Grid base: 8pt/px
+- Preto puro (#000000) deve ser evitado no digital — usar tons escuros (#121212, #2B2B2B, #333333)
+- Branco ou off-white (#FAFAFA, #F5F7FA) para fundos claros
+- Hierarquia clara entre título, subtítulo e corpo
 
-# Opção A — definir na hora de rodar (recomendado)
-ANTHROPIC_API_KEY=sk-ant-... npm start
+REGRAS DE CORTE (marcam automaticamente como reprovado):
+- Erro de português (ortografia/gramática)
+- Problema de legibilidade (tamanho/contraste/entrelinha)
+- CTA ausente ou confuso
+- Desalinhamento evidente ou quebra de grid
+- Imagem com baixa qualidade (pixelização, recorte inadequado)
 
-# Opção B — criar arquivo .env (instale dotenv: npm install dotenv)
-# Adicione ao topo do server.js: require('dotenv').config()
-# Crie o arquivo .env com: ANTHROPIC_API_KEY=sk-ant-...
-```
+Responda APENAS com JSON válido, sem markdown ou texto adicional.
 
-## Rodando
+Formato exato:
+{
+  "scores": {
+    "tipografia": {
+      "ortografia": 0,
+      "espacamento_pontuacao": 0,
+      "hierarquia_tipografica": 0,
+      "legibilidade": 0,
+      "quebras_linha": 0,
+      "consistencia_estilos": 0
+    },
+    "grid": {
+      "alinhamento": 0,
+      "espacamento_consistente": 0,
+      "margens": 0,
+      "proporcao": 0
+    },
+    "hierarquia": {
+      "ponto_focal": 0,
+      "ordem_leitura": 0,
+      "cta": 0,
+      "escaneabilidade": 0
+    },
+    "cores": {
+      "contraste": 0,
+      "uso_cores": 0,
+      "fundo": 0
+    },
+    "imagens": {
+      "qualidade_imagem": 0,
+      "consistencia_visual": 0,
+      "recorte": 0,
+      "icones": 0
+    },
+    "marca": {
+      "uso_marca": 0,
+      "unidade_visual": 0,
+      "padroes": 0
+    },
+    "tecnico": {
+      "dimensoes": 0,
+      "nitidez": 0
+    }
+  },
+  "cut_rules_triggered": [],
+  "feedback": [
+    { "block": "nome do bloco", "level": "critical|warning|ok", "text": "feedback específico e acionável" }
+  ],
+  "summary": "Resumo executivo em 1-2 frases do estado geral da peça"
+}
 
-```bash
-ANTHROPIC_API_KEY=sk-ant-SUA_CHAVE_AQUI npm start
-```
+cut_rules_triggered deve conter apenas os itens detectados. [] se nenhum.
+feedback: máximo 6 itens, críticos primeiro.
+Seja específico e acionável no feedback.`;
 
-Abra o navegador em: **http://localhost:3000**
+app.post('/api/analyze', async (req, res) => {
+  try {
+    const { imageBase64, imageMime } = req.body;
+    if (!imageBase64 || !imageMime) {
+      return res.status(400).json({ error: 'Imagem obrigatória' });
+    }
 
-## Como usar
+    const message = await client.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 1500,
+      system: SYSTEM_PROMPT,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: imageMime, data: imageBase64 } },
+          { type: 'text', text: 'Analise essa arte de design e retorne o JSON de avaliação conforme instruído. Seja criterioso mas justo.' }
+        ]
+      }]
+    });
 
-1. Acesse http://localhost:3000
-2. Arraste ou clique para selecionar a arte (PNG, JPG, WEBP)
-3. Clique em "Analisar com IA"
-4. Aguarde ~10 segundos para o resultado completo
+    const rawText = message.content[0].text.trim();
+    const cleaned = rawText.replace(/```json|```/g, '').trim();
+    const result = JSON.parse(cleaned);
+    res.json(result);
+  } catch (err) {
+    console.error('Erro na análise:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 
-## Critérios avaliados
-
-- **Texto e Tipografia** (12 pts): ortografia, hierarquia, legibilidade, estilos
-- **Layout e Espaçamento** (8 pts): alinhamento, grid, margens, proporção  
-- **Hierarquia e Leitura** (8 pts): ponto focal, CTA, escaneabilidade
-- **Cores e Contraste** (6 pts): contraste 4.5:1, paleta, fundo
-- **Imagens e Elementos** (8 pts): resolução, recorte, consistência
-- **Consistência de Marca** (6 pts): logo, padrões, unidade visual
-- **Técnico** (4 pts): dimensões, nitidez, exportação
-
-**Total: 52 pontos → convertido para 0-100%**
-
-## Escala de aprovação
-
-| Score | Status     | Ação                          |
-|-------|------------|-------------------------------|
-| 90–100| Excelente  | Pode subir para validação     |
-| 75–89 | Bom        | Ajustes finos opcionais       |
-| 60–74 | Médio      | Revisar pontos críticos       |
-| 0–59  | Crítico    | Refazer com base nos critérios|
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`✅ QA Design rodando em: http://localhost:${PORT}`);
+});
